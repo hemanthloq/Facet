@@ -35,6 +35,25 @@ Test:
 curl -X POST http://localhost:8000/search -H "Content-Type: application/json" -d "{\"query\": \"best laptops under 60000\"}"
 ```
 
+## Calling it from the frontend
+
+- Send `Content-Type: application/json`. `fetch` with a string body and no header sends
+  `text/plain`, which gets a 422.
+- Don't send `credentials: "include"` — CORS is `*`, which browsers reject with credentials.
+- Latency: typically 11-15s. Worst case about 2.5 minutes. The server retries only 503/overload
+  errors: the classify call gets 3 tries at 10s max plus 3s backoff, SerpApi up to 2 calls at
+  15s each, and the extract call gets 3 tries at 30s max plus 3s backoff.
+- `fetch` does not reject on non-2xx, so check `res.ok`. Failures come back as:
+
+| Status | Body | Meaning |
+|---|---|---|
+| 422 | `{"detail": [...]}` (FastAPI default) | missing/blank `query`, or body not JSON |
+| 502 | `{"error": "search_unavailable", "message": "..."}` | SerpApi down, timed out, or bad key |
+| 503 | `{"error": "ai_busy", "message": "..."}` | LLM rate-limited, overloaded, or timed out — retry later |
+| 502 | `{"error": "ai_unavailable", "message": "..."}` | LLM rejected the request (e.g. bad key) |
+| 502 | `{"error": "ai_bad_output", "message": "..."}` | LLM answered with unusable JSON — retrying usually works |
+| 500 | `{"error": "internal_error", "message": "..."}` | bug on our side |
+
 ## Notes
 
 - Currently wired to Gemini (`llm_extract.py`) for intent classification + column

@@ -8,7 +8,11 @@ load_dotenv()
 
 from anthropic import Anthropic
 
-_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from table_shape import LLMOutputError, build_table
+
+# SDK defaults are a 600s timeout and 2 retries of its own; _call_with_retry already retries,
+# so the SDK's are turned off rather than multiplying (3 x 3 attempts).
+_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=30.0, max_retries=0)
 _CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 _EXTRACT_MODEL = "claude-sonnet-5"
 
@@ -26,7 +30,11 @@ Given a user's query and a list of raw result items, you must:
    For any "price" column, always copy the numeric "price" field's value exactly as given —
    never derive it from price_display, never add symbols, commas, or reformat it. If "price"
    is null in the raw item, the column value is null too.
-4. Write one short caption sentence explaining what you're comparing by and why.
+4. Any value that is a plain quantity with no unit (a price, a count, a rating) must be a
+   JSON number, not a string — 550, not "550". Keep a string only when the unit is part of
+   the value (e.g. "16GB", "18 hrs").
+5. Every row must contain a key for every name in "columns", spelled exactly the same.
+6. Write one short caption sentence explaining what you're comparing by and why.
 
 Respond with ONLY a JSON object, no prose, no markdown code fences, in exactly this shape:
 {
@@ -56,6 +64,10 @@ def _call_with_retry(fn, retries=3, base_delay=1.0):
             time.sleep(base_delay * (2 ** attempt))
 
 
+def _text_of(message) -> str:
+    return "".join(b.text for b in message.content if getattr(b, "type", None) == "text")
+
+
 def _strip_code_fence(text: str) -> str:
     text = text.strip()
     m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
@@ -69,8 +81,9 @@ def classify_intent(query: str) -> str:
         max_tokens=5,
         system=_CLASSIFY_SYSTEM,
         messages=[{"role": "user", "content": query}],
+        timeout=10.0,
     ))
-    label = message.content[0].text.strip().lower()
+    label = _text_of(message).strip().lower()
     return "shopping" if "shop" in label else "other"
 
 
@@ -88,21 +101,17 @@ def infer_and_extract(query: str, items: list[dict]) -> dict:
         }],
     ))
 
-    raw_text = message.content[0].text
+    raw_text = _text_of(message)
     cleaned = _strip_code_fence(raw_text)
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not m:
-            raise ValueError(f"Claude did not return parseable JSON:\n{raw_text}")
-        parsed = json.loads(m.group(0))
+        try:
+            parsed = json.loads(m.group(0)) if m else None
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is None:
+            raise LLMOutputError(f"Claude did not return parseable JSON:\n{raw_text}")
 
-    extracted_rows = parsed.get("rows", [])
-    rows = []
-    for i, (item, extracted) in enumerate(zip(items, extracted_rows)):
-        row = {"id": f"r{i + 1}", **extracted}
-        row["source_snippet"] = item.get("snippet")
-        rows.append(row)
-
-    return {"caption": parsed.get("caption", ""), "columns": parsed.get("columns", []), "rows": rows}
+    return build_table(parsed, items)

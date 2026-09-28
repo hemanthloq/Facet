@@ -7,8 +7,13 @@ load_dotenv()
 
 from google import genai
 
+from table_shape import LLMOutputError, build_table
+
 _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 _MODEL = "gemini-3.1-flash-lite"  # gemini-3.8-flash hit its 20-req/day free-tier cap during testing
+# The SDK's default is no timeout at all, so a hung request would block /search forever.
+_CLASSIFY_TIMEOUT_MS = 10_000
+_EXTRACT_TIMEOUT_MS = 30_000
 
 _EXTRACT_SYSTEM = """You turn raw search results into a structured comparison table.
 
@@ -26,6 +31,12 @@ separate "price_display" string (human-readable, may contain currency symbols/co
 any "price" column, always copy the numeric "price" field's value exactly as given — never
 derive it from price_display, never add symbols, commas, or reformat it. If "price" is null
 in the raw item, the column value is null too.
+
+Any value that is a plain quantity with no unit (a price, a count, a rating) must be a JSON
+number, not a string — 550, not "550". Keep a string only when the unit is part of the value
+(e.g. "16GB", "18 hrs").
+
+Every row must contain a key for every name in "columns", spelled exactly the same.
 
 Respond with a JSON object in exactly this shape:
 {
@@ -64,6 +75,7 @@ def classify_intent(query: str) -> str:
             "system_instruction": _CLASSIFY_SYSTEM,
             "max_output_tokens": 20,
             "thinking_config": {"thinking_budget": 0},  # one-word answer, no reasoning needed
+            "http_options": {"timeout": _CLASSIFY_TIMEOUT_MS},
         },
     ))
     label = (response.text or "").strip().lower()
@@ -82,19 +94,13 @@ def infer_and_extract(query: str, items: list[dict]) -> dict:
             "response_mime_type": "application/json",
             "max_output_tokens": 4096,
             "thinking_config": {"thinking_budget": 0},  # structured extraction, no reasoning needed
+            "http_options": {"timeout": _EXTRACT_TIMEOUT_MS},
         },
     ))
 
     try:
         parsed = json.loads(response.text)
     except (json.JSONDecodeError, TypeError):
-        raise ValueError(f"Gemini did not return parseable JSON:\n{response.text}")
+        raise LLMOutputError(f"Gemini did not return parseable JSON:\n{response.text}")
 
-    extracted_rows = parsed.get("rows", [])
-    rows = []
-    for i, (item, extracted) in enumerate(zip(items, extracted_rows)):
-        row = {"id": f"r{i + 1}", **extracted}
-        row["source_snippet"] = item.get("snippet")
-        rows.append(row)
-
-    return {"caption": parsed.get("caption", ""), "columns": parsed.get("columns", []), "rows": rows}
+    return build_table(parsed, items)
