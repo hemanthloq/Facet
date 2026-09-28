@@ -24,8 +24,11 @@ SerpApi's engines (including Google Shopping) as native tools for agent
 frameworks, and explicitly supports the Claude Agent SDK.
 
 Current `/search` implementation: we call SerpApi ourselves, then hand the
-raw JSON to one Claude prompt that infers attributes and extracts values.
-This works and is fine to ship as-is.
+raw JSON to one Gemini prompt (Google GenAI SDK) that infers attributes and
+extracts values. A small Gemini call before that classifies the query as
+shopping or not, to pick which SerpApi engine to use. A Claude version of
+both calls is implemented in `backend/claude_extract.py` as a fallback, but
+it isn't the active engine. This works and is fine to ship as-is.
 
 The stronger version: give Claude the shopping-search tool directly (via
 `serpapi_search_tools`) and let it decide when and how to call it, instead
@@ -38,9 +41,16 @@ there's spare time; not worth risking the schedule for.
 ## Stack
 - Backend: Python + FastAPI
 - Frontend: plain HTML/CSS/JS
-- Search: SerpApi (tries the Google Shopping engine first, falls back to
-  general search)
-- Reasoning/extraction: Claude (Anthropic API)
+- Search: SerpApi — a small LLM call classifies the query first; product
+  queries go to the Google Shopping engine (falling back to general search if
+  it returns nothing), everything else goes straight to general Google search.
+- Reasoning/extraction for `/search`: Gemini via the Google GenAI SDK —
+  currently `gemini-3.1-flash-lite`, because `gemini-3.8-flash` (the original
+  choice) allows only 20 requests/day on the free tier. Claude (Anthropic API)
+  is implemented as a ready fallback in `backend/claude_extract.py`, tested
+  against mocked responses only; it isn't the active engine.
+- Reasoning for `/refine` and `/insight`: Claude (Anthropic API), as
+  originally planned — owners, update this line if that changes.
 
 ## Setup
 
@@ -61,8 +71,14 @@ backend runs elsewhere.
 Copy `backend/.env.example` to `backend/.env` and fill in:
 ```
 SERPAPI_API_KEY=...
+GEMINI_API_KEY=...
 ANTHROPIC_API_KEY=...
 ```
+`/search` needs `SERPAPI_API_KEY` and `GEMINI_API_KEY`. It only needs
+`ANTHROPIC_API_KEY` if you swap it to the Claude fallback (see
+`backend/README.md` for how). Whether `/refine` or `/insight` need
+`ANTHROPIC_API_KEY` is up to their owners.
+
 Never commit `.env` — it's already in `.gitignore`.
 
 ## API contract
@@ -115,8 +131,8 @@ writing new files so you don't duplicate or diverge from it.
 
 **Heddy — backend core, owns `/search`**
 1. Test the SerpApi `google_shopping` engine with a real query first — confirm what fields it actually returns before writing extraction logic.
-2. Fall back to the general `google` engine when Shopping returns nothing (non-shopping queries).
-3. One Claude call that infers 3–5 relevant attributes, extracts them per result, and writes the caption — one call, not three.
+2. Route non-shopping queries to the general `google` engine, decided by a small LLM classification call before searching — Shopping almost always returns *something* (even for "coffee shops"), so "fall back when empty" never triggered.
+3. One LLM call (Gemini; Claude fallback in `backend/claude_extract.py`) that infers 3–5 relevant attributes, extracts them per result, and writes the caption — one call, not three.
 4. Give every row a stable `id`, and carry the raw snippet forward as `source_snippet` for `/insight` to use later.
 - Watch for: the model wrapping JSON in prose/a code fence — parse defensively. Null out attributes that don't exist in the raw data rather than inventing plausible numbers. Test on 3+ different query domains (not just laptops) to prove the inference genuinely adapts.
 
