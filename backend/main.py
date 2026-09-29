@@ -15,6 +15,8 @@ from pydantic import BaseModel, StringConstraints
 from serp_client import search
 from llm_extract import infer_and_extract
 from table_shape import LLMOutputError
+from refine import do_refine, RefineRequest
+from insight import do_insight, InsightRequest
 
 log = logging.getLogger("uvicorn.error")
 
@@ -58,3 +60,30 @@ def do_search(req: SearchRequest):
         if type(e).__module__.startswith(("google.genai", "anthropic", "httpx")):
             return _error(502, "ai_unavailable", "The AI service returned an error.")
         return _error(500, "internal_error", "Something went wrong on our side.")
+
+
+@app.post("/refine")
+def refine_comparison(req: RefineRequest):
+    try:
+        return do_refine(req.query, req.rows, req.instruction)
+    except Exception as e:
+        log.exception("/refine failed")
+        if isinstance(e, httpx.TimeoutException) or _upstream_status(e) in (429, 503, 529):
+            return _error(503, "ai_busy", "The AI service is busy or rate-limited. Please try again shortly.")
+        if type(e).__module__.startswith(("google.genai", "anthropic", "httpx")):
+            return _error(502, "ai_unavailable", "The AI service returned an error.")
+        return _error(500, "internal_error", "Something went wrong refining the comparison.")
+
+
+@app.post("/insight")
+def get_row_insight(req: InsightRequest):
+    try:
+        return do_insight(req.row)
+    except Exception as e:
+        log.exception("/insight failed")
+        if isinstance(e, httpx.TimeoutException) or _upstream_status(e) in (429, 503, 529):
+            return _error(503, "ai_busy", "The AI service is busy or rate-limited. Please try again shortly.")
+        if type(e).__module__.startswith(("google.genai", "anthropic", "httpx")):
+            return _error(502, "ai_unavailable", "The AI service returned an error.")
+        return _error(500, "internal_error", "Something went wrong retrieving item insights.")
+

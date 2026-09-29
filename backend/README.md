@@ -1,6 +1,6 @@
-# backend — /search
+# backend — /search, /refine, /insight
 
-FastAPI service exposing `POST /search`. See project contract for request/response shape.
+FastAPI service exposing `POST /search`, `POST /refine`, and `POST /insight`. See project contract for request/response shape.
 
 ## Setup
 
@@ -33,6 +33,16 @@ Test:
 
 ```
 curl -X POST http://localhost:8000/search -H "Content-Type: application/json" -d "{\"query\": \"best laptops under 60000\"}"
+```
+
+Test `/refine`:
+```
+curl -X POST http://localhost:8000/refine -H "Content-Type: application/json" -d "{\"query\": \"best laptops\", \"rows\": [{\"id\":\"r1\",\"name\":\"ASUS Vivobook\",\"price\":54990}], \"instruction\": \"only show under 50k\"}"
+```
+
+Test `/insight`:
+```
+curl -X POST http://localhost:8000/insight -H "Content-Type: application/json" -d "{\"row\": {\"id\":\"r1\",\"name\":\"ASUS Vivobook\",\"source_snippet\":\"Great build quality and fast charging.\"}}"
 ```
 
 ## Calling it from the frontend
