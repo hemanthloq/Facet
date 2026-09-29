@@ -54,7 +54,7 @@ def do_search(req: SearchRequest):
         return _error(502, "ai_bad_output", "The AI returned a response we couldn't read. Please try again.")
     except Exception as e:
         log.exception("/search failed")
-        if isinstance(e, httpx.TimeoutException) or _upstream_status(e) in (429, 503, 529) \
+        if isinstance(e, httpx.TimeoutException) or _upstream_status(e) in (429, 503, 504, 529) \
                 or type(e).__name__ in ("APITimeoutError", "RateLimitError", "OverloadedError"):
             return _error(503, "ai_busy", "The AI service is busy or rate-limited. Please try again shortly.")
         if type(e).__module__.startswith(("google.genai", "anthropic", "httpx")):
