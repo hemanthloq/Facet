@@ -557,6 +557,37 @@ table.facet-table tbody tr.item-row.selected td {
   color: var(--ink-faint);
 }
 
+.cell-tier {
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 3px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.05em;
+  display: inline-block;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.cell-bool-yes {
+  font-weight: 600;
+  color: var(--good);
+  background: var(--good-soft);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.cell-bool-no {
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-soft);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 /* Expandable Inline Insight Row */
 tr.insight-container-row td {
   padding: 0;

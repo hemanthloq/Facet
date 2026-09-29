@@ -60,6 +60,19 @@ class TestRefineAndInsight(unittest.TestCase):
         self.assertNotIn("Lenovo IdeaPad Slim 5", names)
         self.assertIn("ASUS Vivobook 15", names)
 
+    def test_refine_symbol_tier(self):
+        restaurant_rows = [
+            {"id": "r1", "name": "Fancy Bistro", "price_level": "$$$", "cuisine": "French"},
+            {"id": "r2", "name": "Cozy Cafe", "price_level": "$$", "cuisine": "Bakery"},
+            {"id": "r3", "name": "Street Eatery", "price_level": "$", "cuisine": "Fast Food"}
+        ]
+        res = _refine_heuristic("best restaurants", restaurant_rows, "only show $$")
+        self.assertEqual(len(res["rows"]), 2)
+        ids = [r["id"] for r in res["rows"]]
+        self.assertIn("r2", ids) # $$
+        self.assertIn("r3", ids) # $
+        self.assertNotIn("r1", ids) # $$$ excluded
+
     def test_insight_with_snippet(self):
         row = self.sample_rows[1] # Lenovo with flag
         res = do_insight(row)

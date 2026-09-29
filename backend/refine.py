@@ -91,6 +91,22 @@ def _refine_heuristic(query: str, rows: list[dict], instruction: str) -> dict:
             kept = filtered
             caption_parts.append(f"over ₹{int(val):,}")
 
+    # Filter: price_level symbol tier (e.g. "$$", "$$$", "under $$")
+    tier_match = re.search(r"(?:under|below|less than|only|show)?\s*(\${1,4})", instruction_lower)
+    if tier_match:
+        target_tier = tier_match.group(1)
+        max_symbols = len(target_tier)
+        filtered = []
+        for r in kept:
+            for k, v in r.items():
+                if isinstance(v, str) and re.fullmatch(r"\${1,4}", v.strip()):
+                    if len(v.strip()) <= max_symbols:
+                        filtered.append(r)
+                        break
+        if filtered:
+            kept = filtered
+            caption_parts.append(f"price level {target_tier} or less")
+
     # Exclude: exclude / without / no / remove
     exclude_match = re.search(r"(?:exclude|without|no|remove)\s+([a-z0-9]+)", instruction_lower)
     if exclude_match:
@@ -158,10 +174,11 @@ You must:
    - For filtering (e.g. "only show under 50k", "must have 16GB", "exclude Lenovo"): keep only rows that qualify.
    - For sorting (e.g. "sort by rating descending", "cheapest first"): order the kept items accordingly.
    - If no items qualify, return an empty array for row_ids.
+   - Note: Some queries return non-numeric columns like price_level ($ or $$) or tags. Handle them naturally by type without assuming all columns are numeric.
 2. CRITICAL CONSTRAINTS:
    - ONLY select from the provided row IDs.
    - NEVER invent a new item or modify any existing values.
-3. Write one short, natural caption explaining what is now being shown (e.g. "Filtered to laptops under ₹50,000, sorted by price").
+3. Write one short, natural caption explaining what is now being shown (e.g. "Filtered to laptops under ₹50,000, sorted by price" or "Filtered to budget-friendly options ($$)").
 
 Respond with ONLY a JSON object:
 {{
@@ -169,7 +186,7 @@ Respond with ONLY a JSON object:
   "row_ids": ["r1", "r2", ...]
 }}
 """
-    system_prompt = "You are a precise comparison table refinement assistant. You filter, reorder, and rank existing items according to instructions without hallucinating or modifying values."
+    system_prompt = "You are a precise comparison table refinement assistant. You filter, reorder, and rank existing items according to instructions without hallucinating or modifying values. You handle both numeric and non-numeric columns (like price_level '$$') appropriately."
 
     response = client.models.generate_content(
         model=_MODEL_GEMINI,

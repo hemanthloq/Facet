@@ -544,34 +544,65 @@ function handleColumnSort(col) {
     const valB = b[col];
 
     // Nulls / empty always sink to the bottom
-    if (valA === null || valA === undefined || valA === "") return 1;
-    if (valB === null || valB === undefined || valB === "") return -1;
+    const isNullA = valA === null || valA === undefined || valA === "";
+    const isNullB = valB === null || valB === undefined || valB === "";
+    if (isNullA && isNullB) return 0;
+    if (isNullA) return 1;
+    if (isNullB) return -1;
 
-    // Numeric comparison
+    // 1. Symbol tier scale (e.g. $, $$, $$$, $$$$)
+    if (isSymbolTier(valA) && isSymbolTier(valB)) {
+      const lenA = String(valA).trim().length;
+      const lenB = String(valB).trim().length;
+      return newDir === "asc" ? lenA - lenB : lenB - lenA;
+    }
+
+    // 2. Both values are numbers
+    if (typeof valA === "number" && typeof valB === "number") {
+      return newDir === "asc" ? valA - valB : valB - valA;
+    }
+
+    // 3. Formatted quantities with identical units (e.g. 16GB vs 8GB, 18 hrs vs 14 hrs)
     const numA = parseSortableNumber(valA);
     const numB = parseSortableNumber(valB);
-
     if (numA !== null && numB !== null) {
       return newDir === "asc" ? numA - numB : numB - numA;
     }
 
-    // String comparison
-    const strA = String(valA).toLowerCase();
-    const strB = String(valB).toLowerCase();
-    return newDir === "asc" ? strA.localeCompare(strB) : strB.localeCompare(strA);
+    // 4. Generic string natural sort (handles non-numeric like "Moderate", "Italian", "30-45 mins")
+    const strA = String(valA);
+    const strB = String(valB);
+    return newDir === "asc"
+      ? strA.localeCompare(strB, undefined, { numeric: true, sensitivity: "base" })
+      : strB.localeCompare(strA, undefined, { numeric: true, sensitivity: "base" });
   });
 
   updateSortHeaderIndicators();
   renderTableBody(state.currentData.rows, state.currentData.columns);
 }
 
+function isSymbolTier(val) {
+  return typeof val === "string" && /^[\$€£₹]{1,5}$/.test(val.trim());
+}
+
 function parseSortableNumber(val) {
   if (typeof val === "number") return val;
   if (typeof val === "string") {
-    // Clean currency symbols, commas, units
-    const cleaned = val.replace(/[₹$,]/g, "").trim();
-    const match = cleaned.match(/^([+-]?(?:\d+(?:\.\d+)?|\.\d+))/);
-    if (match) return parseFloat(match[1]);
+    const s = val.trim();
+    // Do not parse repeated currency symbols ($$, $$$) as numbers!
+    if (/^[\$€£₹]+$/.test(s)) return null;
+
+    // Check for clean currency strings like "₹54,990" or "$50"
+    const currMatch = s.match(/^[₹$€£]\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)$/);
+    if (currMatch) {
+      return parseFloat(currMatch[1].replace(/,/g, ""));
+    }
+
+    // Check for number with optional units (e.g. "16GB", "18 hrs", "4.5 stars", "50000")
+    const match = s.match(/^([+-]?(?:\d+(?:,\d+)*(?:\.\d+)?|\.\d+))\s*([a-zA-Z%]+)?$/);
+    if (match) {
+      return parseFloat(match[1].replace(/,/g, ""));
+    }
   }
   return null;
 }
@@ -739,26 +770,40 @@ function formatCellValue(col, val) {
     return `<span class="cell-null">—</span>`;
   }
 
-  const colLower = String(col).toLowerCase();
+  // 1. Boolean values
+  if (typeof val === "boolean") {
+    return val ? `<span class="cell-bool-yes">Yes</span>` : `<span class="cell-bool-no">No</span>`;
+  }
 
-  // Price formatting
-  if (colLower === "price" || colLower.includes("price") || colLower.includes("cost") || colLower.includes("fee")) {
-    if (typeof val === "number") {
+  // 2. Numeric values
+  if (typeof val === "number") {
+    const colLower = String(col).toLowerCase();
+    // Only format with currency if the column name specifically represents an actual currency amount (not price_level, etc.)
+    if (colLower === "price" || colLower === "price_inr" || colLower === "cost" || colLower === "fee") {
       return `<span class="cell-price">₹${val.toLocaleString("en-IN")}</span>`;
     }
-    const cleanNum = parseFloat(String(val).replace(/[₹$,]/g, ""));
-    if (!isNaN(cleanNum)) {
-      return `<span class="cell-price">₹${cleanNum.toLocaleString("en-IN")}</span>`;
+    if (colLower === "rating" || colLower === "score") {
+      return `<span class="cell-rating">★ ${val}</span>`;
     }
-    return `<span class="cell-price">${escapeHtml(String(val))}</span>`;
+    return val.toLocaleString();
   }
 
-  // Rating formatting
-  if (colLower === "rating" || colLower.includes("rating") || colLower === "score") {
-    return `<span class="cell-rating">★ ${escapeHtml(String(val))}</span>`;
+  // 3. String values (e.g. price_level as "$$", cuisine, duration, etc.)
+  const strVal = String(val).trim();
+
+  // Repeated symbol scale (like "$", "$$", "$$$", "€€")
+  if (isSymbolTier(strVal)) {
+    return `<span class="cell-tier" title="Price tier: ${escapeHtml(strVal)}">${escapeHtml(strVal)}</span>`;
   }
 
-  return escapeHtml(String(val));
+  // Rating string (e.g. "4.5" or "4.8")
+  const colLower = String(col).toLowerCase();
+  if ((colLower === "rating" || colLower === "score") && !strVal.includes("★")) {
+    return `<span class="cell-rating">★ ${escapeHtml(strVal)}</span>`;
+  }
+
+  // General text: render generic string as is, without assuming numeric
+  return escapeHtml(strVal);
 }
 
 function escapeHtml(str) {
