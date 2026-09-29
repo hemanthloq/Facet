@@ -1,12 +1,22 @@
 """Turns an LLM's parsed JSON into a contract-shaped table, without trusting the LLM's
 internal consistency. Shared by llm_extract.py and claude_extract.py."""
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
 # Raw fields we already hold as clean numbers from SerpApi. When a column has one of these
-# names, the value comes from our own data rather than the LLM's copy of it.
-_NUMERIC_FIELDS = ("price", "rating", "reviews_count")
+# names (key: column name, value: raw field), the value comes from our own data rather
+# than the LLM's copy of it.
+_NUMERIC_FIELDS = {"price": "price", "rating": "rating",
+                   "reviews": "reviews_count", "reviews_count": "reviews_count"}
+
+
+def _column_key(name: str) -> str:
+    """Consistent lowercase keys whatever casing the LLM used: "Popular For" ->
+    "popular_for", "Wi-Fi" -> "wi-fi", "Price for Two" -> "price_for_two"."""
+    key = re.sub(r"[^a-z0-9-]+", "_", name.strip().lower())
+    return key.strip("_-")
 
 
 class LLMOutputError(ValueError):
@@ -59,10 +69,14 @@ def build_table(parsed, items: list[dict]) -> dict:
     columns = parsed.get("columns")
     if not isinstance(columns, list):
         columns = []
-    # Dedupe and drop non-string names; "id"/"source_snippet" are ours, never LLM columns.
-    columns = list(dict.fromkeys(
-        c for c in columns if isinstance(c, str) and c and c not in ("id", "source_snippet")
-    ))
+    # Normalised key -> the name the LLM used. Duplicates, non-strings and our own keys
+    # ("id", "source_snippet") are dropped.
+    keys = {}
+    for c in columns:
+        key = _column_key(c) if isinstance(c, str) else ""
+        if key and key not in ("id", "source_snippet") and key not in keys:
+            keys[key] = c
+    columns = list(keys)
 
     extracted_rows = parsed.get("rows")
     if not isinstance(extracted_rows, list):
@@ -72,12 +86,13 @@ def build_table(parsed, items: list[dict]) -> dict:
     rows = []
     for i, (item, extracted) in enumerate(zip(items, matched)):
         extracted = extracted or {}
+        by_key = {_column_key(k): v for k, v in extracted.items() if isinstance(k, str)}
         row = {"id": f"r{i + 1}", "name": extracted.get("name") or item.get("name")}
-        for col in columns:
-            if col == "name":
+        for key, llm_name in keys.items():
+            if key == "name":
                 continue
-            raw = item.get(col.lower()) if col.lower() in _NUMERIC_FIELDS else None
-            row[col] = raw if raw is not None else extracted.get(col)
+            raw = item.get(_NUMERIC_FIELDS[key]) if key in _NUMERIC_FIELDS else None
+            row[key] = raw if raw is not None else extracted.get(llm_name, by_key.get(key))
         # source_snippet is always ours; any other key the LLM added is dropped.
         row["source_snippet"] = item.get("snippet")
         rows.append(row)

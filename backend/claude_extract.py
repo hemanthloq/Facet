@@ -34,7 +34,7 @@ def _call_with_retry(fn, retries=3, base_delay=1.0):
         try:
             return fn()
         except Exception as e:
-            transient = any(s in str(e) for s in ("503", "529", "overloaded", "rate_limit", "429"))
+            transient = any(s in str(e) for s in ("503", "504", "529", "overloaded", "rate_limit", "429"))
             if attempt == retries - 1 or not transient:
                 raise
             time.sleep(base_delay * (2 ** attempt))
