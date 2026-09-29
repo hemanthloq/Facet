@@ -24,11 +24,12 @@ SerpApi's engines (including Google Shopping) as native tools for agent
 frameworks, and explicitly supports the Claude Agent SDK.
 
 Current `/search` implementation: we call SerpApi ourselves, then hand the
-raw JSON to one Gemini prompt (Google GenAI SDK) that infers attributes and
-extracts values. A small Gemini call before that classifies the query as
-shopping or not, to pick which SerpApi engine to use. A Claude version of
-both calls is implemented in `backend/claude_extract.py` as a fallback, but
-it isn't the active engine. This works and is fine to ship as-is.
+raw JSON to one Gemini prompt (Google GenAI SDK) that picks columns and
+extracts values. Keyword rules pick the SerpApi engine, with a small Gemini
+call only for ambiguous queries. A Claude version of both calls is
+implemented in `backend/claude_extract.py` as a fallback, but it isn't the
+active engine. This works and is fine to ship as-is. See `backend/README.md`
+for how routing, column choice and captions work.
 
 The stronger version: give Claude the shopping-search tool directly (via
 `serpapi_search_tools`) and let it decide when and how to call it, instead
@@ -41,9 +42,10 @@ there's spare time; not worth risking the schedule for.
 ## Stack
 - Backend: Python + FastAPI
 - Frontend: plain HTML/CSS/JS
-- Search: SerpApi — a small LLM call classifies the query first; product
-  queries go to the Google Shopping engine (falling back to general search if
-  it returns nothing), everything else goes straight to general Google search.
+- Search: SerpApi — keyword rules (an LLM call only when they're ambiguous)
+  send product queries to Google Shopping, place queries to Google Maps, and
+  everything else to general Google search; Shopping and Maps fall back to
+  general search if they return nothing.
 - Reasoning/extraction for `/search`: Gemini via the Google GenAI SDK —
   currently `gemini-3.1-flash-lite`, because `gemini-3.8-flash` (the original
   choice) allows only 20 requests/day on the free tier. Claude (Anthropic API)
@@ -88,7 +90,7 @@ Request: `{ "query": string }`
 Response:
 ```json
 {
-  "caption": "Comparing by price, RAM, battery, and rating since you're shopping for laptops",
+  "caption": "Comparing by price, ram, battery and rating.",
   "columns": ["price", "ram", "battery", "rating"],
   "rows": [
     { "id": "r1", "name": "ASUS Vivobook 15", "price": 54990, "ram": "16GB", "battery": "18 hrs", "rating": 4.5, "source_snippet": "..." }
@@ -131,8 +133,8 @@ writing new files so you don't duplicate or diverge from it.
 
 **Heddy — backend core, owns `/search`**
 1. Test the SerpApi `google_shopping` engine with a real query first — confirm what fields it actually returns before writing extraction logic.
-2. Route non-shopping queries to the general `google` engine, decided by a small LLM classification call before searching — Shopping almost always returns *something* (even for "coffee shops"), so "fall back when empty" never triggered.
-3. One LLM call (Gemini; Claude fallback in `backend/claude_extract.py`) that infers 3–5 relevant attributes, extracts them per result, and writes the caption — one call, not three.
+2. Route by query type before searching — products to `google_shopping`, places to `google_maps`, the rest to general `google` — because Shopping almost always returns *something* (even for "coffee shops"), so "fall back when empty" never triggered.
+3. One LLM call (Gemini; Claude fallback in `backend/claude_extract.py`) that picks 3–5 relevant attributes and extracts them per result; the caption is built in code from the columns that survive.
 4. Give every row a stable `id`, and carry the raw snippet forward as `source_snippet` for `/insight` to use later.
 - Watch for: the model wrapping JSON in prose/a code fence — parse defensively. Null out attributes that don't exist in the raw data rather than inventing plausible numbers. Test on 3+ different query domains (not just laptops) to prove the inference genuinely adapts.
 
