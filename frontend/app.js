@@ -25,46 +25,60 @@ const state = {
   progressStartTime: 0,
 };
 
-// DOM Elements
-const searchForm = document.getElementById("searchForm");
-const searchInput = document.getElementById("searchInput");
-const btnClear = document.getElementById("btnClear");
-const btnSearch = document.getElementById("btnSearch");
-const progressCard = document.getElementById("progressCard");
-const progressTitleText = document.getElementById("progressTitleText");
-const progressTimer = document.getElementById("progressTimer");
-const timerText = document.getElementById("timerText");
-const btnCancelSearch = document.getElementById("btnCancelSearch");
-const progressBar = document.getElementById("progressBar");
-const progressDetail = document.getElementById("progressDetail");
-const progressSlowNotice = document.getElementById("progressSlowNotice");
-const pStep1 = document.getElementById("pStep1");
-const pStep2 = document.getElementById("pStep2");
-const pStep3 = document.getElementById("pStep3");
-const pStep4 = document.getElementById("pStep4");
+// DOM Elements (initialized in browser)
+let searchForm, searchInput, btnClear, btnSearch;
+let progressCard, progressTitleText, progressTimer, timerText, btnCancelSearch, progressBar, progressDetail, progressSlowNotice;
+let pStep1, pStep2, pStep3, pStep4;
+let errorCard, errorTitle, errorDesc, btnRetry;
+let emptyCard, emptyDesc;
+let resultsSection, tableCaption, tableMetaCount, refinedBadge, btnResetRefine, tableHeaderRow, tableBody;
+let refineForm, refineInput, btnRefine;
 
-const errorCard = document.getElementById("errorCard");
-const errorTitle = document.getElementById("errorTitle");
-const errorDesc = document.getElementById("errorDesc");
-const btnRetry = document.getElementById("btnRetry");
+function initDomElements() {
+  if (typeof document === "undefined") return;
+  searchForm = document.getElementById("searchForm");
+  searchInput = document.getElementById("searchInput");
+  btnClear = document.getElementById("btnClear");
+  btnSearch = document.getElementById("btnSearch");
+  progressCard = document.getElementById("progressCard");
+  progressTitleText = document.getElementById("progressTitleText");
+  progressTimer = document.getElementById("progressTimer");
+  timerText = document.getElementById("timerText");
+  btnCancelSearch = document.getElementById("btnCancelSearch");
+  progressBar = document.getElementById("progressBar");
+  progressDetail = document.getElementById("progressDetail");
+  progressSlowNotice = document.getElementById("progressSlowNotice");
+  pStep1 = document.getElementById("pStep1");
+  pStep2 = document.getElementById("pStep2");
+  pStep3 = document.getElementById("pStep3");
+  pStep4 = document.getElementById("pStep4");
 
-const emptyCard = document.getElementById("emptyCard");
-const emptyDesc = document.getElementById("emptyDesc");
+  errorCard = document.getElementById("errorCard");
+  errorTitle = document.getElementById("errorTitle");
+  errorDesc = document.getElementById("errorDesc");
+  btnRetry = document.getElementById("btnRetry");
 
-const resultsSection = document.getElementById("resultsSection");
-const tableCaption = document.getElementById("tableCaption");
-const tableMetaCount = document.getElementById("tableMetaCount");
-const refinedBadge = document.getElementById("refinedBadge");
-const btnResetRefine = document.getElementById("btnResetRefine");
-const tableHeaderRow = document.getElementById("tableHeaderRow");
-const tableBody = document.getElementById("tableBody");
+  emptyCard = document.getElementById("emptyCard");
+  emptyDesc = document.getElementById("emptyDesc");
 
-const refineForm = document.getElementById("refineForm");
-const refineInput = document.getElementById("refineInput");
-const btnRefine = document.getElementById("btnRefine");
+  resultsSection = document.getElementById("resultsSection");
+  tableCaption = document.getElementById("tableCaption");
+  tableMetaCount = document.getElementById("tableMetaCount");
+  refinedBadge = document.getElementById("refinedBadge");
+  btnResetRefine = document.getElementById("btnResetRefine");
+  tableHeaderRow = document.getElementById("tableHeaderRow");
+  tableBody = document.getElementById("tableBody");
+
+  refineForm = document.getElementById("refineForm");
+  refineInput = document.getElementById("refineInput");
+  btnRefine = document.getElementById("btnRefine");
+}
 
 // Initialize Event Listeners
 function init() {
+  if (typeof document === "undefined") return;
+  initDomElements();
+  if (!searchForm) return;
   searchForm.addEventListener("submit", handleSearchSubmit);
   refineForm.addEventListener("submit", handleRefineSubmit);
   btnRetry.addEventListener("click", () => {
@@ -161,7 +175,7 @@ async function executeSearch(query) {
     console.error("Search network error:", err);
     showError(
       "Connection Failed",
-      `Could not connect to backend server at ${API_BASE}. Make sure the FastAPI backend is running via 'uvicorn main:app --reload --port 8000'.`
+      `Could not connect to backend server at ${API_BASE}. Make sure the FastAPI backend is running.<br><button type="button" class="btn-secondary" style="margin-top:12px;" onclick="loadDemoQueryData('${escapeHtml(query)}')">Explore with Sample Comparison Data</button>`
     );
   } finally {
     setSearchingState(false);
@@ -228,11 +242,22 @@ async function executeRefine(instruction) {
 
     handleRefineSuccess(data, instruction);
   } catch (err) {
-    console.error("Refine network error:", err);
-    showError(
-      "Refinement Error",
-      "Network connection error while contacting the refinement service. Please try again."
-    );
+    console.warn("Refine backend network error, falling back to client-side refinement:", err);
+    try {
+      const fallbackResult = clientSideRefine(
+        state.currentQuery,
+        state.currentData.rows,
+        instruction,
+        state.currentData.columns
+      );
+      handleRefineSuccess(fallbackResult, instruction);
+    } catch (fallbackErr) {
+      console.error("Client-side refine error:", fallbackErr);
+      showError(
+        "Refinement Error",
+        "Could not refine results with the provided instruction. Please try a simpler phrase like 'only under 50k' or 'sort by cheapest'."
+      );
+    }
   } finally {
     setRefiningState(false);
   }
@@ -353,8 +378,14 @@ async function toggleRowInsight(row, parentTr) {
     state.insightCache[rowId] = insightData;
     renderInsightCardContent(rowId, insightData, row);
   } catch (err) {
-    console.error("Insight fetch error:", err);
-    renderInsightError(rowId, "Could not contact insight service. Please try again.");
+    console.warn("Insight backend network error, falling back to local review analysis:", err);
+    if (row.source_snippet) {
+      const fallbackInsight = extractFallbackInsight(row.source_snippet);
+      state.insightCache[rowId] = fallbackInsight;
+      renderInsightCardContent(rowId, fallbackInsight, row);
+    } else {
+      renderInsightError(rowId, "No review snippet was returned in the search results for this item.");
+    }
   }
 }
 
@@ -841,7 +872,7 @@ function hideAllAlerts() {
 
 function showError(title, message) {
   errorTitle.textContent = title;
-  errorDesc.textContent = message;
+  errorDesc.innerHTML = message;
   errorCard.style.display = "flex";
   resultsSection.style.display = "none";
 }
@@ -955,7 +986,352 @@ function escapeHtml(str) {
 }
 
 // Global invocation for inline callbacks if needed
-window.resetToOriginalResults = resetToOriginalResults;
+if (typeof window !== "undefined") {
+  window.resetToOriginalResults = resetToOriginalResults;
+  window.loadDemoQueryData = loadDemoQueryData;
+  document.addEventListener("DOMContentLoaded", init);
+}
 
-// Run on load
-document.addEventListener("DOMContentLoaded", init);
+// -------------------------------------------------------------
+// Standalone Demo Datasets & Offline Fallbacks
+// -------------------------------------------------------------
+
+const DEMO_DATASETS = {
+  laptop: {
+    caption: "Comparing by price, ram, battery and rating.",
+    columns: ["price", "ram", "battery", "rating"],
+    rows: [
+      {
+        id: "demo-r1",
+        name: "ASUS Vivobook 15",
+        price: 54990,
+        ram: "16GB",
+        battery: "18 hrs",
+        rating: 4.5,
+        source_snippet: "Praised for build quality and fast charging. Lightweight chassis with crisp display."
+      },
+      {
+        id: "demo-r2",
+        name: "Lenovo IdeaPad Slim 5",
+        price: 58490,
+        ram: "16GB",
+        battery: "16 hrs",
+        rating: 4.3,
+        source_snippet: "Speakers described as tinny at high volume. Multiple reviews mention battery health drops after 8 months."
+      },
+      {
+        id: "demo-r3",
+        name: "HP Pavilion 15",
+        price: 46990,
+        ram: "8GB",
+        battery: "14 hrs",
+        rating: 4.1,
+        source_snippet: "Budget friendly option with decent performance. Reliable keyboard and touchpad for daily work."
+      },
+      {
+        id: "demo-r4",
+        name: "Acer Aspire Lite",
+        price: 38990,
+        ram: "8GB",
+        battery: "11 hrs",
+        rating: 3.9,
+        source_snippet: "Very affordable entry laptop. Plastic build feels cheap according to several buyers."
+      }
+    ]
+  },
+  cafe: {
+    caption: "Comparing by price_level, price_range, atmosphere, wifi and rating.",
+    columns: ["price_level", "price_range", "atmosphere", "wifi", "rating"],
+    rows: [
+      {
+        id: "demo-c1",
+        name: "Third Wave Coffee",
+        price_level: "$$",
+        price_range: "₹200–400",
+        atmosphere: "Quiet & Work-friendly",
+        wifi: "Fast (100 Mbps)",
+        rating: 4.6,
+        source_snippet: "Great cold brew and dedicated work desks with power sockets. Peak hours can be crowded."
+      },
+      {
+        id: "demo-c2",
+        name: "Blue Tokai Coffee Roasters",
+        price_level: "$$$",
+        price_range: "₹500–800",
+        atmosphere: "Artisan & Vibrant",
+        wifi: "Reliable",
+        rating: 4.5,
+        source_snippet: "Exceptional specialty pour-overs and sourdough toasts. Limited parking on weekends."
+      },
+      {
+        id: "demo-c3",
+        name: "Araku Coffee",
+        price_level: "$$$$",
+        price_range: "₹800–1500",
+        atmosphere: "Luxury & Serene",
+        wifi: "High Speed",
+        rating: 4.7,
+        source_snippet: "Stunning architecture and award-winning single-origin brews. Premium price point."
+      },
+      {
+        id: "demo-c4",
+        name: "Corner Cafe & Bakery",
+        price_level: "$",
+        price_range: "₹90–150",
+        atmosphere: "Bustling & Cozy",
+        wifi: "Basic",
+        rating: 4.2,
+        source_snippet: "Pocket friendly tea and fresh puffs. Quick service but limited seating."
+      }
+    ]
+  },
+  course: {
+    caption: "Comparing by duration, level, certificate, price and rating.",
+    columns: ["duration", "level", "certificate", "price", "rating"],
+    rows: [
+      {
+        id: "demo-e1",
+        name: "Complete Python Bootcamp",
+        duration: "22 hrs",
+        level: "Beginner",
+        certificate: "Yes",
+        price: 499,
+        rating: 4.6,
+        source_snippet: "Hands-on coding exercises and clear explanations for total newcomers."
+      },
+      {
+        id: "demo-e2",
+        name: "Python for Data Science (IBM)",
+        duration: "18 hrs",
+        level: "Beginner",
+        certificate: "Verified",
+        price: "Free to Audit",
+        rating: 4.7,
+        source_snippet: "Industry recognized certification with Jupyter notebook labs. Peer reviews take time."
+      },
+      {
+        id: "demo-e3",
+        name: "Applied Machine Learning in Python",
+        duration: "34 hrs",
+        level: "Intermediate",
+        certificate: "Yes",
+        price: 3499,
+        rating: 4.5,
+        source_snippet: "In-depth scikit-learn coverage. Steep learning curve for complete beginners."
+      }
+    ]
+  }
+};
+
+function loadDemoQueryData(query) {
+  hideAllAlerts();
+  const qLower = (query || "").toLowerCase();
+  let demo = DEMO_DATASETS.laptop;
+  if (qLower.includes("cafe") || qLower.includes("coffee") || qLower.includes("restaurant") || qLower.includes("food")) {
+    demo = DEMO_DATASETS.cafe;
+  } else if (qLower.includes("python") || qLower.includes("course") || qLower.includes("data science")) {
+    demo = DEMO_DATASETS.course;
+  }
+  state.currentQuery = query || "best laptops under 60k with good battery";
+  if (searchInput) searchInput.value = state.currentQuery;
+  handleSearchSuccess(demo);
+}
+
+function clientSideRefine(query, rows, instruction, columns) {
+  if (!rows || rows.length === 0) {
+    return { caption: "No items to refine", columns: columns || [], rows: [] };
+  }
+
+  const instructionLower = (instruction || "").toLowerCase().trim();
+  let kept = [...rows];
+  const captionParts = [];
+
+  // Filter: under / below / less than
+  const underMatch = instructionLower.match(/(?:under|below|less than|max|at most|<|<=)\s*(?:rs\.?|inr|₹|\$)?\s*([0-9]+(?:\.[0-9]+)?)\s*(k|lakh|lac|m)?/i);
+  if (underMatch) {
+    let val = parseFloat(underMatch[1]);
+    const unit = (underMatch[2] || "").toLowerCase();
+    if (unit === "k") val *= 1000;
+    else if (unit === "lakh" || unit === "lac") val *= 100000;
+    else if (unit === "m") val *= 1000000;
+
+    const filtered = kept.filter(r => {
+      for (const [k, v] of Object.entries(r)) {
+        if (k === "id" || k === "source_snippet") continue;
+        const parsed = parseSingleNumber(v) || parseRange(v);
+        if (parsed) {
+          const num = parsed.value !== undefined ? parsed.value : parsed.low;
+          if (k.toLowerCase().includes("price") || k.toLowerCase().includes("cost")) {
+            return num <= val;
+          }
+        }
+      }
+      if (r.price !== undefined && r.price !== null) {
+        const numP = parseFloat(String(r.price).replace(/,/g, "").replace(/[₹$€£]/g, "").trim());
+        if (!isNaN(numP)) return numP <= val;
+      }
+      return true;
+    });
+
+    if (filtered.length > 0) {
+      kept = filtered;
+      captionParts.push(`under ₹${val.toLocaleString()}`);
+    }
+  }
+
+  // Filter: over / above / greater than
+  const overMatch = instructionLower.match(/(?:over|above|greater than|min|at least|>|>=)\s*(?:rs\.?|inr|₹|\$)?\s*([0-9]+(?:\.[0-9]+)?)\s*(k|lakh|lac|m)?/i);
+  if (overMatch) {
+    let val = parseFloat(overMatch[1]);
+    const unit = (overMatch[2] || "").toLowerCase();
+    if (unit === "k") val *= 1000;
+    else if (unit === "lakh" || unit === "lac") val *= 100000;
+    else if (unit === "m") val *= 1000000;
+
+    const filtered = kept.filter(r => {
+      for (const [k, v] of Object.entries(r)) {
+        if (k === "id" || k === "source_snippet") continue;
+        const parsed = parseSingleNumber(v) || parseRange(v);
+        if (parsed) {
+          const num = parsed.value !== undefined ? parsed.value : parsed.low;
+          if (k.toLowerCase().includes("price") || k.toLowerCase().includes("cost")) {
+            return num >= val;
+          }
+        }
+      }
+      if (r.price !== undefined && r.price !== null) {
+        const numP = parseFloat(String(r.price).replace(/,/g, "").replace(/[₹$€£]/g, "").trim());
+        if (!isNaN(numP)) return numP >= val;
+      }
+      return true;
+    });
+
+    if (filtered.length > 0) {
+      kept = filtered;
+      captionParts.push(`over ₹${val.toLocaleString()}`);
+    }
+  }
+
+  // Filter: Symbol tier (e.g. "$$", "under $$")
+  const tierMatch = instructionLower.match(/(?:under|below|less than|only|show)?\s*(\${1,4})/);
+  if (tierMatch) {
+    const targetTier = tierMatch[1];
+    const maxSymbols = targetTier.length;
+    const filtered = kept.filter(r => {
+      for (const [k, v] of Object.entries(r)) {
+        const tier = parseSymbolTier(v);
+        if (tier) return tier.count <= maxSymbols;
+      }
+      return true;
+    });
+    if (filtered.length > 0) {
+      kept = filtered;
+      captionParts.push(`price level ${targetTier} or less`);
+    }
+  }
+
+  // Filter: Exclude
+  const excludeMatch = instructionLower.match(/(?:exclude|without|no|remove)\s+(.+)/i);
+  if (excludeMatch) {
+    const target = excludeMatch[1].trim().toLowerCase();
+    const filtered = kept.filter(r => {
+      const name = String(r.name || "").toLowerCase();
+      return !name.includes(target);
+    });
+    if (filtered.length > 0) {
+      kept = filtered;
+      captionParts.push(`excluding "${target}"`);
+    }
+  }
+
+  // Sorting
+  if (instructionLower.includes("cheapest") || instructionLower.includes("lowest price") || instructionLower.includes("price low")) {
+    kept.sort((a, b) => {
+      const aVal = (detectSortKey(a.price || a.price_range || a.cost).value) ?? Infinity;
+      const bVal = (detectSortKey(b.price || b.price_range || b.cost).value) ?? Infinity;
+      return aVal - bVal;
+    });
+    captionParts.push("sorted by price: low to high");
+  } else if (instructionLower.includes("highest price") || instructionLower.includes("most expensive")) {
+    kept.sort((a, b) => {
+      const aVal = (detectSortKey(a.price || a.price_range || a.cost).value) ?? -Infinity;
+      const bVal = (detectSortKey(b.price || b.price_range || b.cost).value) ?? -Infinity;
+      return bVal - aVal;
+    });
+    captionParts.push("sorted by price: high to low");
+  } else if (instructionLower.includes("rating") || instructionLower.includes("top rated") || instructionLower.includes("best rated")) {
+    kept.sort((a, b) => {
+      const aVal = (detectSortKey(a.rating).value) ?? -Infinity;
+      const bVal = (detectSortKey(b.rating).value) ?? -Infinity;
+      return bVal - aVal;
+    });
+    captionParts.push("sorted by rating");
+  }
+
+  // Keyword filter if no numeric filters matched
+  if (!underMatch && !overMatch && !tierMatch && !excludeMatch && kept.length === rows.length) {
+    const stopWords = new Set(["show", "only", "the", "with", "for", "me", "find", "all", "sort", "by", "items", "where"]);
+    const words = (instructionLower.match(/[a-z0-9]+/g) || []).filter(w => !stopWords.has(w));
+    if (words.length > 0) {
+      const matching = kept.filter(r => {
+        const text = (String(r.name || "") + " " + Object.values(r).join(" ")).toLowerCase();
+        return words.some(w => text.includes(w));
+      });
+      if (matching.length > 0) {
+        kept = matching;
+        captionParts.push(`matching "${instruction}"`);
+      }
+    }
+  }
+
+  const caption = captionParts.length > 0
+    ? `Refined to items ${captionParts.join(", ")} (${kept.length} ${kept.length === 1 ? "item" : "items"}).`
+    : `Refined results for "${instruction}" (${kept.length} ${kept.length === 1 ? "item" : "items"}).`;
+
+  return {
+    caption,
+    columns: columns || Object.keys(rows[0] || {}).filter(k => k !== "id" && k !== "name" && k !== "source_snippet"),
+    rows: kept
+  };
+}
+
+function extractFallbackInsight(snippet) {
+  if (!snippet) {
+    return { pros: [], cons: [], flag: null, note: "No review snippet was returned in the search results for this item." };
+  }
+  const sentences = snippet.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+  const pros = [];
+  const cons = [];
+  let flag = null;
+
+  sentences.forEach(s => {
+    const sLower = s.toLowerCase();
+    if (sLower.includes("drops") || sLower.includes("degrade") || sLower.includes("health drops") || sLower.includes("warning") || sLower.includes("caution")) {
+      flag = s;
+    } else if (sLower.includes("tinny") || sLower.includes("cheap") || sLower.includes("poor") || sLower.includes("bad") || sLower.includes("limited") || sLower.includes("steep") || sLower.includes("slow")) {
+      if (cons.length < 2) cons.push(s);
+    } else if (sLower.includes("praised") || sLower.includes("great") || sLower.includes("fast") || sLower.includes("exceptional") || sLower.includes("good") || sLower.includes("stunning") || sLower.includes("reliable")) {
+      if (pros.length < 2) pros.push(s);
+    }
+  });
+
+  if (pros.length === 0 && cons.length === 0 && !flag) {
+    pros.push(sentences[0] || snippet);
+  }
+
+  return { pros, cons, flag };
+}
+
+// Export for Node unit tests
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    parseSymbolTier,
+    parseRange,
+    parseSingleNumber,
+    detectSortKey,
+    compareSortKeys,
+    clientSideRefine,
+    extractFallbackInsight,
+    DEMO_DATASETS
+  };
+}

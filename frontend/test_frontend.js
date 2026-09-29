@@ -270,3 +270,56 @@ assert.ok(sortedNullsAsc[2].id === "b" || sortedNullsAsc[2].id === "d");
 assert.ok(sortedNullsAsc[3].id === "b" || sortedNullsAsc[3].id === "d");
 
 console.log("\nALL TYPE-AWARE SORTING TESTS PASSED PERFECTLY!");
+
+// -------------------------------------------------------------
+// Tests for Client-Side Refinement & Fallback Insight
+// -------------------------------------------------------------
+const { clientSideRefine, extractFallbackInsight } = require("./app.js");
+
+console.log("\n=== TEST 6: Refine: Price Filter ('only show under 50k') ===");
+const refinePriceRes = clientSideRefine("best venues", mixedDataset, "only show under 50k", ["price", "tier", "price_range"]);
+assert.strictEqual(refinePriceRes.rows.length, 2);
+const priceIds = refinePriceRes.rows.map(r => r.id);
+assert.ok(priceIds.includes("r4")); // 32000
+assert.ok(priceIds.includes("r2")); // 46990
+assert.ok(!priceIds.includes("r1")); // 54990 excluded
+assert.ok(!priceIds.includes("r3")); // 58490 excluded
+console.log("PASS: Filtered to", refinePriceRes.rows.length, "items under 50k");
+
+console.log("\n=== TEST 7: Refine: Symbol Tier Filter ('only show $$') ===");
+const refineTierRes = clientSideRefine("best venues", mixedDataset, "only show $$", ["price", "tier", "price_range"]);
+assert.strictEqual(refineTierRes.rows.length, 2);
+const tierIds = refineTierRes.rows.map(r => r.id);
+assert.ok(tierIds.includes("r2")); // $
+assert.ok(tierIds.includes("r4")); // $$
+assert.ok(!tierIds.includes("r1")); // $$$ excluded
+assert.ok(!tierIds.includes("r3")); // $$$$ excluded
+console.log("PASS: Filtered to", refineTierRes.rows.length, "items with tier $$ or lower");
+
+console.log("\n=== TEST 8: Refine: Exclusion ('exclude Venue C') ===");
+const refineExcludeRes = clientSideRefine("best venues", mixedDataset, "exclude Venue C", ["price", "tier", "price_range"]);
+assert.strictEqual(refineExcludeRes.rows.length, 3);
+const names = refineExcludeRes.rows.map(r => r.name);
+assert.ok(!names.includes("Venue C"));
+console.log("PASS: Correctly excluded Venue C");
+
+console.log("\n=== TEST 9: Refine: Sort Instruction ('sort by cheapest') ===");
+const refineSortRes = clientSideRefine("best venues", mixedDataset, "sort by cheapest", ["price", "tier", "price_range"]);
+assert.strictEqual(refineSortRes.rows[0].id, "r4"); // 32000
+assert.strictEqual(refineSortRes.rows[1].id, "r2"); // 46990
+assert.strictEqual(refineSortRes.rows[2].id, "r1"); // 54990
+assert.strictEqual(refineSortRes.rows[3].id, "r3"); // 58490
+console.log("PASS: Sorted rows by cheapest first");
+
+console.log("\n=== TEST 10: Fallback Insight Extraction ===");
+const sampleSnippet = "Praised for build quality and fast charging. Speakers described as tinny at high volume. Multiple reviews mention battery health drops after 8 months.";
+const insightRes = extractFallbackInsight(sampleSnippet);
+assert.ok(insightRes.pros.length > 0, "Should extract pro");
+assert.ok(insightRes.cons.length > 0, "Should extract con");
+assert.ok(insightRes.flag !== null, "Should extract flag");
+console.log("PASS: Fallback insight extracted pros, cons, and warning flag");
+
+console.log("\n==========================================");
+console.log("ALL 10 FRONTEND TEST SUITES PASSED 100%!");
+console.log("==========================================");
+

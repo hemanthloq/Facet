@@ -1,0 +1,17 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Editor & IDE
+.vscode/
+.idea/
+
+# Node / JS
+node_modules/
+npm-debug.log*
+
+# Python & Environment
+__pycache__/
+*.pyc
+*.pyo
+.env
