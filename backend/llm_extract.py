@@ -7,6 +7,7 @@ load_dotenv()
 
 from google import genai
 
+from query_focus import EXTRACT_RULES, extract_prompt
 from table_shape import LLMOutputError, build_table
 
 _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -15,42 +16,13 @@ _MODEL = "gemini-3.1-flash-lite"  # gemini-3.8-flash hit its 20-req/day free-tie
 _CLASSIFY_TIMEOUT_MS = 10_000
 _EXTRACT_TIMEOUT_MS = 30_000
 
-_EXTRACT_SYSTEM = """You turn raw search results into a structured comparison table.
-
-Given a user's query and a list of raw result items, you must:
-1. Infer 3-5 column attributes that actually matter for comparing THIS kind of thing
-   (laptops get RAM/battery/price; restaurants get cuisine/price-range/rating; courses
-   get duration/price/level). Do not default to laptop-shaped columns for non-laptop queries.
-2. For each item, extract values using ONLY what's in the raw data given to you. If an
-   attribute genuinely isn't present for an item, set it to null. NEVER invent or estimate
-   a plausible-looking value.
-3. Write one short caption sentence explaining what you're comparing by and why.
-
-Raw items include both a numeric "price" field (already parsed, no currency symbol) and a
-separate "price_display" string (human-readable, may contain currency symbols/commas). For
-any "price" column, always copy the numeric "price" field's value exactly as given — never
-derive it from price_display, never add symbols, commas, or reformat it. If "price" is null
-in the raw item, the column value is null too.
-
-Any value that is a plain quantity with no unit (a price, a count, a rating) must be a JSON
-number, not a string — 550, not "550". Keep a string only when the unit is part of the value
-(e.g. "16GB", "18 hrs").
-
-Every row must contain a key for every name in "columns", spelled exactly the same.
-
-Respond with a JSON object in exactly this shape:
-{
-  "caption": "...",
-  "columns": ["col1", "col2", ...],
-  "rows": [ {"name": "...", "col1": ..., "col2": ...} ]
-}
-"rows" must have exactly one entry per input item, in the same order.
-"""
 
 _CLASSIFY_SYSTEM = (
     "Classify the search query as exactly one word: 'shopping' if the person wants "
-    "to buy/compare a physical product (laptops, phones, shoes, furniture...), or "
-    "'other' for anything else (restaurants, courses, services, places, general info). "
+    "to buy/compare a physical product (laptops, phones, shoes, furniture...); 'place' "
+    "if they want to find/compare physical venues or local businesses to visit (cafes, "
+    "restaurants, gyms, salons, clinics, hotels, stores as places); or 'other' for "
+    "anything else (courses, services, software, general info). "
     "Respond with only that one word."
 )
 
@@ -67,7 +39,7 @@ def _call_with_retry(fn, retries=3, base_delay=1.0):
 
 
 def classify_intent(query: str) -> str:
-    """Returns 'shopping' or 'other'."""
+    """Returns 'shopping', 'place' or 'other'."""
     response = _call_with_retry(lambda: _client.models.generate_content(
         model=_MODEL,
         contents=query,
@@ -78,7 +50,13 @@ def classify_intent(query: str) -> str:
             "http_options": {"timeout": _CLASSIFY_TIMEOUT_MS},
         },
     ))
-    label = (response.text or "").strip().lower()
+    return _parse_label(response.text)
+
+
+def _parse_label(text) -> str:
+    label = (text or "").strip().lower()
+    if "place" in label:
+        return "place"
     return "shopping" if "shop" in label else "other"
 
 
@@ -88,9 +66,9 @@ def infer_and_extract(query: str, items: list[dict]) -> dict:
 
     response = _call_with_retry(lambda: _client.models.generate_content(
         model=_MODEL,
-        contents=f"Query: {query}\n\nRaw items:\n{json.dumps(items, indent=2)}",
+        contents=extract_prompt(query, items),
         config={
-            "system_instruction": _EXTRACT_SYSTEM,
+            "system_instruction": EXTRACT_RULES,
             "response_mime_type": "application/json",
             "max_output_tokens": 4096,
             "thinking_config": {"thinking_budget": 0},  # structured extraction, no reasoning needed

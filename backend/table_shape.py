@@ -82,5 +82,26 @@ def build_table(parsed, items: list[dict]) -> dict:
         row["source_snippet"] = item.get("snippet")
         rows.append(row)
 
-    caption = parsed.get("caption")
-    return {"caption": caption if isinstance(caption, str) else "", "columns": columns, "rows": rows}
+    # A column most rows can't fill is noise, not a comparison. Drop any column that is
+    # empty on more than half the rows.
+    sparse = [c for c in columns if c != "name"
+              and 2 * sum(r.get(c) not in (None, "", []) for r in rows) < len(rows)]
+    if sparse:
+        log.warning("Dropping columns filled on fewer than half the rows: %s", sparse)
+        columns = [c for c in columns if c not in sparse]
+        for r in rows:
+            for c in sparse:
+                r.pop(c, None)
+
+    return {"caption": _caption(columns), "columns": columns, "rows": rows}
+
+
+def _caption(columns: list[str]) -> str:
+    """Built from the columns that survived the guardrail, so the caption can never
+    mention one the table doesn't have."""
+    names = [c.replace("_", " ") for c in columns if c != "name"]
+    if not names:
+        return "None of the attributes were available for enough of these results to compare."
+    if len(names) == 1:
+        return f"Comparing by {names[0]}."
+    return f"Comparing by {', '.join(names[:-1])} and {names[-1]}."
