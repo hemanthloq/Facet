@@ -67,13 +67,27 @@
       <div class="progress-header">
         <div class="progress-title">
           <div class="spinner"></div>
-          <span id="progressTitleText">Extracting Comparison Dimensions...</span>
+          <span id="progressTitleText">Building live comparison...</span>
         </div>
-        <div id="progressTimer" class="progress-timer">00:00s elapsed</div>
+        <div class="progress-header-actions">
+          <div id="progressTimer" class="progress-timer">
+            <span class="progress-pulse"></span>
+            <span id="timerText">00:00 elapsed</span>
+          </div>
+          <button type="button" id="btnCancelSearch" class="btn-cancel-search" title="Cancel this search">
+            Cancel
+          </button>
+        </div>
       </div>
       <div class="progress-bar-bg">
         <div id="progressBar" class="progress-bar-fill"></div>
       </div>
+      
+      <!-- Dynamic live status detail box -->
+      <div id="progressDetail" class="progress-detail">
+        Classifying query intent and checking Google Shopping engine...
+      </div>
+
       <div class="progress-steps">
         <div id="pStep1" class="progress-step active">
           <div class="step-dot"></div>
@@ -92,8 +106,17 @@
           <span>4. Extracting grounded values & building sortable table</span>
         </div>
       </div>
+
+      <!-- Slow state notice (visible when query takes longer than 30s) -->
+      <div id="progressSlowNotice" class="progress-slow-notice" style="display: none;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+        <span>
+          Deep search active: Queries triggering search engine fallbacks and AI retry backoffs can take up to ~3 minutes in the worst case. Your search is running smoothly.
+        </span>
+      </div>
+
       <p class="progress-note">
-        Live search queries typically take ~11–15 seconds to search, classify, and infer facets fresh from real data.
+        Facet searches live internet data, infers custom facets per query, and grounds every value without hardcoded schemas.
       </p>
     </section>
 

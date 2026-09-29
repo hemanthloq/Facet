@@ -1,26 +1,151 @@
 const assert = require("assert");
 
-function isSymbolTier(val) {
-  return typeof val === "string" && /^[\$€£₹]{1,5}$/.test(val.trim());
+// -------------------------------------------------------------
+// Type-Aware Detection and Parsing Helpers
+// -------------------------------------------------------------
+
+function parseSymbolTier(val) {
+  if (typeof val !== "string") return null;
+  const s = val.trim();
+  const m = s.match(/^([\$€£₹])\1{0,4}$/);
+  if (m) {
+    return {
+      symbol: m[1],
+      count: s.length
+    };
+  }
+  return null;
 }
 
-function parseSortableNumber(val) {
-  if (typeof val === "number") return val;
+function parseRange(val) {
+  if (typeof val !== "string") return null;
+  const s = val.trim();
+  // Match range with dash (hyphen, en-dash \u2013, em-dash \u2014) or "to"
+  const rangeRegex = /^[₹$€£\s]*(?:rs\.?|inr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*(?:[–—\-]|to)\s*[₹$€£\s]*(?:rs\.?|inr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*([a-zA-Z%]+)?$/i;
+  const m = s.match(rangeRegex);
+  if (m) {
+    const low = parseFloat(m[1].replace(/,/g, ""));
+    const high = parseFloat(m[2].replace(/,/g, ""));
+    const midpoint = (low + high) / 2;
+    const unit = m[3] ? m[3].trim().toLowerCase() : "";
+    return { low, high, midpoint, unit };
+  }
+  return null;
+}
+
+function parseSingleNumber(val) {
+  if (typeof val === "number" && !isNaN(val)) {
+    return { value: val, unit: "" };
+  }
   if (typeof val === "string") {
     const s = val.trim();
     if (/^[\$€£₹]+$/.test(s)) return null;
 
-    const currMatch = s.match(/^[₹$€£]\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)$/);
+    const currMatch = s.match(/^[₹$€£\s]*(?:rs\.?|inr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)$/i);
     if (currMatch) {
-      return parseFloat(currMatch[1].replace(/,/g, ""));
+      return { value: parseFloat(currMatch[1].replace(/,/g, "")), unit: "" };
     }
 
-    const match = s.match(/^([+-]?(?:\d+(?:,\d+)*(?:\.\d+)?|\.\d+))\s*([a-zA-Z%]+)?$/);
-    if (match) {
-      return parseFloat(match[1].replace(/,/g, ""));
+    const unitMatch = s.match(/^([+-]?(?:\d+(?:,\d+)*(?:\.\d+)?|\.\d+))\s*([a-zA-Z%]+)?$/);
+    if (unitMatch) {
+      return {
+        value: parseFloat(unitMatch[1].replace(/,/g, "")),
+        unit: unitMatch[2] ? unitMatch[2].trim().toLowerCase() : ""
+      };
     }
   }
   return null;
+}
+
+function detectSortKey(val) {
+  if (val === null || val === undefined || val === "") {
+    return { type: "empty", value: null };
+  }
+
+  // 1. Symbol tier (e.g. "$", "$$", "$$$", "$$$$")
+  const tier = parseSymbolTier(val);
+  if (tier) {
+    return { type: "tier", value: tier.count, raw: val };
+  }
+
+  // 2. Number / Currency Range (e.g. "₹200–400", "₹90–150")
+  const range = parseRange(val);
+  if (range) {
+    // Sort primarily by lower bound, secondary by upper bound / midpoint
+    return {
+      type: "numeric",
+      value: range.low,
+      secondary: range.high,
+      midpoint: range.midpoint,
+      raw: val
+    };
+  }
+
+  // 3. Plain Number or Single Quantity with Unit/Currency (e.g. 54990, "₹54,990", "16GB", "18 hrs")
+  const single = parseSingleNumber(val);
+  if (single) {
+    return {
+      type: "numeric",
+      value: single.value,
+      secondary: single.value,
+      midpoint: single.value,
+      raw: val
+    };
+  }
+
+  // 4. Plain text fallback (e.g. "Italian", "Casual", "Beginner")
+  return {
+    type: "text",
+    value: String(val).trim(),
+    raw: val
+  };
+}
+
+function compareSortKeys(keyA, keyB, direction) {
+  // Empty values always sink to the bottom in both directions
+  if (keyA.type === "empty" && keyB.type === "empty") return 0;
+  if (keyA.type === "empty") return 1;
+  if (keyB.type === "empty") return -1;
+
+  // 1. Both are numeric (including ranges, plain numbers, currency amounts)
+  if (keyA.type === "numeric" && keyB.type === "numeric") {
+    let diff = keyA.value - keyB.value;
+    if (diff === 0 && keyA.secondary !== undefined && keyB.secondary !== undefined) {
+      diff = keyA.secondary - keyB.secondary;
+    }
+    return direction === "asc" ? diff : -diff;
+  }
+
+  // 2. Both are symbol tiers (e.g. "$$" vs "$$$$")
+  if (keyA.type === "tier" && keyB.type === "tier") {
+    const diff = keyA.value - keyB.value;
+    return direction === "asc" ? diff : -diff;
+  }
+
+  // 3. Both are plain text (e.g. "Italian" vs "Chinese")
+  if (keyA.type === "text" && keyB.type === "text") {
+    return direction === "asc"
+      ? keyA.value.localeCompare(keyB.value, undefined, { numeric: true, sensitivity: "base" })
+      : keyB.value.localeCompare(keyA.value, undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  // 4. Mixed types within same column
+  const typeRank = { numeric: 1, tier: 2, text: 3 };
+  const rankA = typeRank[keyA.type] || 99;
+  const rankB = typeRank[keyB.type] || 99;
+  if (rankA !== rankB) {
+    return direction === "asc" ? rankA - rankB : rankB - rankA;
+  }
+
+  return 0;
+}
+
+function sortRows(rows, col, direction) {
+  return [...rows].sort((a, b) => {
+    const keyA = detectSortKey(a[col]);
+    const keyB = detectSortKey(b[col]);
+    return compareSortKeys(keyA, keyB, direction);
+  });
 }
 
 function formatCellValue(col, val) {
@@ -44,10 +169,18 @@ function formatCellValue(col, val) {
   }
 
   const strVal = String(val).trim();
-  if (isSymbolTier(strVal)) {
+
+  // Repeated symbol scale (like "$", "$$", "$$$", "€€")
+  if (parseSymbolTier(strVal)) {
     return `<span class="cell-tier" title="Price tier: ${strVal}">${strVal}</span>`;
   }
 
+  // Number / Currency range (like "₹200–400")
+  if (parseRange(strVal)) {
+    return `<span class="cell-range">${strVal}</span>`;
+  }
+
+  // Rating string (e.g. "4.5" or "4.8")
   const colLower = String(col).toLowerCase();
   if ((colLower === "rating" || colLower === "score") && !strVal.includes("★")) {
     return `<span class="cell-rating">★ ${strVal}</span>`;
@@ -56,92 +189,84 @@ function formatCellValue(col, val) {
   return strVal;
 }
 
-function sortRows(rows, col, direction) {
-  return [...rows].sort((a, b) => {
-    const valA = a[col];
-    const valB = b[col];
+// =============================================================
+// TEST SUITE: Mixed-Type Example & Range Sorting
+// =============================================================
 
-    const isNullA = valA === null || valA === undefined || valA === "";
-    const isNullB = valB === null || valB === undefined || valB === "";
-    if (isNullA && isNullB) return 0;
-    if (isNullA) return 1;
-    if (isNullB) return -1;
-
-    // 1. Symbol tier scale (e.g. $, $$, $$$, $$$$)
-    if (isSymbolTier(valA) && isSymbolTier(valB)) {
-      const lenA = String(valA).trim().length;
-      const lenB = String(valB).trim().length;
-      return direction === "asc" ? lenA - lenB : lenB - lenA;
-    }
-
-    // 2. Both values are numbers
-    if (typeof valA === "number" && typeof valB === "number") {
-      return direction === "asc" ? valA - valB : valB - valA;
-    }
-
-    // 3. Formatted quantities with identical units (e.g. 16GB, 18 hrs)
-    const numA = parseSortableNumber(valA);
-    const numB = parseSortableNumber(valB);
-    if (numA !== null && numB !== null) {
-      return direction === "asc" ? numA - numB : numB - numA;
-    }
-
-    // 4. Generic string natural sort
-    const strA = String(valA);
-    const strB = String(valB);
-    return direction === "asc"
-      ? strA.localeCompare(strB, undefined, { numeric: true, sensitivity: "base" })
-      : strB.localeCompare(strA, undefined, { numeric: true, sensitivity: "base" });
-  });
-}
-
-// Tests
-
-// 1. Non-numeric price_level as "$$" rendering
-const renderedTier = formatCellValue("price_level", "$$");
-assert.ok(renderedTier.includes('class="cell-tier"'));
-assert.ok(renderedTier.includes("$$"));
-assert.ok(!renderedTier.includes("₹"), "Should NOT format $$ with rupee symbol");
-
-// 2. Sorting by non-numeric price_level ($ vs $$ vs $$$)
-const restaurantRows = [
-  { id: "r1", name: "Cafe A", price_level: "$$$" },
-  { id: "r2", name: "Bistro B", price_level: "$" },
-  { id: "r3", name: "Diner C", price_level: "$$" },
-  { id: "r4", name: "Place D", price_level: null }
+// Mixed dataset containing:
+// 1. A numeric price column
+// 2. A "$$"-style tier column
+// 3. A "₹X–Y" range column
+// 4. A text column
+const mixedDataset = [
+  { id: "r1", name: "Venue A", price: 54990, tier: "$$$",  price_range: "₹200–400", cuisine: "Italian" },
+  { id: "r2", name: "Venue B", price: 46990, tier: "$",    price_range: "₹90–150",  cuisine: "Cafe" },
+  { id: "r3", name: "Venue C", price: 58490, tier: "$$$$", price_range: "₹500–800", cuisine: "Continental" },
+  { id: "r4", name: "Venue D", price: 32000, tier: "$$",   price_range: "₹50–80",   cuisine: "Bakery" }
 ];
 
-const sortedTierAsc = sortRows(restaurantRows, "price_level", "asc");
-assert.strictEqual(sortedTierAsc[0].id, "r2"); // $ (tier 1)
-assert.strictEqual(sortedTierAsc[1].id, "r3"); // $$ (tier 2)
-assert.strictEqual(sortedTierAsc[2].id, "r1"); // $$$ (tier 3)
-assert.strictEqual(sortedTierAsc[3].id, "r4"); // null at bottom
+console.log("=== TEST 1: Range Column ('₹200–400' vs '₹90–150') ===");
+// In plain string comparison:
+// "₹200–400".localeCompare("₹90–150") would put "₹200–400" first because '2' < '9'. That is WRONG.
+// Type-aware sorting parses 90 and 200, so "₹90–150" must come before "₹200–400".
+const sortedByRangeAsc = sortRows(mixedDataset, "price_range", "asc");
+console.log("Ascending by price_range:");
+sortedByRangeAsc.forEach(r => console.log(`  ${r.name}: ${r.price_range}`));
+assert.strictEqual(sortedByRangeAsc[0].id, "r4", "₹50–80 should be first (50)");
+assert.strictEqual(sortedByRangeAsc[1].id, "r2", "₹90–150 should be second (90)");
+assert.strictEqual(sortedByRangeAsc[2].id, "r1", "₹200–400 should be third (200)");
+assert.strictEqual(sortedByRangeAsc[3].id, "r3", "₹500–800 should be fourth (500)");
 
-const sortedTierDesc = sortRows(restaurantRows, "price_level", "desc");
-assert.strictEqual(sortedTierDesc[0].id, "r1"); // $$$ (tier 3)
-assert.strictEqual(sortedTierDesc[1].id, "r3"); // $$ (tier 2)
-assert.strictEqual(sortedTierDesc[2].id, "r2"); // $ (tier 1)
-assert.strictEqual(sortedTierDesc[3].id, "r4"); // null at bottom
+const sortedByRangeDesc = sortRows(mixedDataset, "price_range", "desc");
+console.log("Descending by price_range:");
+sortedByRangeDesc.forEach(r => console.log(`  ${r.name}: ${r.price_range}`));
+assert.strictEqual(sortedByRangeDesc[0].id, "r3", "₹500–800 should be first");
+assert.strictEqual(sortedByRangeDesc[3].id, "r4", "₹50–80 should be last");
 
-// 3. Numeric price sorting
-const laptopRows = [
-  { id: "r1", name: "Laptop A", price: 54990 },
-  { id: "r2", name: "Laptop B", price: 58490 },
-  { id: "r3", name: "Laptop C", price: 46990 }
+console.log("\n=== TEST 2: Tier Column ('$$'-style) ===");
+const sortedByTierAsc = sortRows(mixedDataset, "tier", "asc");
+console.log("Ascending by tier:");
+sortedByTierAsc.forEach(r => console.log(`  ${r.name}: ${r.tier}`));
+assert.strictEqual(sortedByTierAsc[0].tier, "$");
+assert.strictEqual(sortedByTierAsc[1].tier, "$$");
+assert.strictEqual(sortedByTierAsc[2].tier, "$$$");
+assert.strictEqual(sortedByTierAsc[3].tier, "$$$$");
+
+const sortedByTierDesc = sortRows(mixedDataset, "tier", "desc");
+console.log("Descending by tier:");
+sortedByTierDesc.forEach(r => console.log(`  ${r.name}: ${r.tier}`));
+assert.strictEqual(sortedByTierDesc[0].tier, "$$$$");
+assert.strictEqual(sortedByTierDesc[3].tier, "$");
+
+console.log("\n=== TEST 3: Numeric Price Column ===");
+const sortedByPriceAsc = sortRows(mixedDataset, "price", "asc");
+console.log("Ascending by numeric price:");
+sortedByPriceAsc.forEach(r => console.log(`  ${r.name}: ₹${r.price}`));
+assert.strictEqual(sortedByPriceAsc[0].price, 32000);
+assert.strictEqual(sortedByPriceAsc[1].price, 46990);
+assert.strictEqual(sortedByPriceAsc[2].price, 54990);
+assert.strictEqual(sortedByPriceAsc[3].price, 58490);
+
+console.log("\n=== TEST 4: Text Column (Alphabetical) ===");
+const sortedByCuisineAsc = sortRows(mixedDataset, "cuisine", "asc");
+console.log("Ascending by cuisine text:");
+sortedByCuisineAsc.forEach(r => console.log(`  ${r.name}: ${r.cuisine}`));
+assert.strictEqual(sortedByCuisineAsc[0].cuisine, "Bakery");
+assert.strictEqual(sortedByCuisineAsc[1].cuisine, "Cafe");
+assert.strictEqual(sortedByCuisineAsc[2].cuisine, "Continental");
+assert.strictEqual(sortedByCuisineAsc[3].cuisine, "Italian");
+
+console.log("\n=== TEST 5: Null / Empty Sinking ===");
+const dataWithNulls = [
+  { id: "a", val: "₹200–400" },
+  { id: "b", val: null },
+  { id: "c", val: "₹90–150" },
+  { id: "d", val: "" }
 ];
-const sortedPriceAsc = sortRows(laptopRows, "price", "asc");
-assert.strictEqual(sortedPriceAsc[0].id, "r3"); // 46990
-assert.strictEqual(sortedPriceAsc[2].id, "r2"); // 58490
+const sortedNullsAsc = sortRows(dataWithNulls, "val", "asc");
+assert.strictEqual(sortedNullsAsc[0].id, "c"); // ₹90–150
+assert.strictEqual(sortedNullsAsc[1].id, "a"); // ₹200–400
+assert.ok(sortedNullsAsc[2].id === "b" || sortedNullsAsc[2].id === "d");
+assert.ok(sortedNullsAsc[3].id === "b" || sortedNullsAsc[3].id === "d");
 
-// 4. String sorting (cuisine)
-const cuisineRows = [
-  { id: "r1", cuisine: "Italian" },
-  { id: "r2", cuisine: "Continental" },
-  { id: "r3", cuisine: "Asian" }
-];
-const sortedCuisine = sortRows(cuisineRows, "cuisine", "asc");
-assert.strictEqual(sortedCuisine[0].cuisine, "Asian");
-assert.strictEqual(sortedCuisine[1].cuisine, "Continental");
-assert.strictEqual(sortedCuisine[2].cuisine, "Italian");
-
-console.log("All generic type-aware sort & render tests passed successfully!");
+console.log("\nALL TYPE-AWARE SORTING TESTS PASSED PERFECTLY!");

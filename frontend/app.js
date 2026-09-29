@@ -20,6 +20,7 @@ const state = {
   insightCache: {},     // { [rowId]: { pros, cons, flag, note } }
   isSearching: false,
   isRefining: false,
+  searchAbortController: null,
   progressInterval: null,
   progressStartTime: 0,
 };
@@ -32,7 +33,11 @@ const btnSearch = document.getElementById("btnSearch");
 const progressCard = document.getElementById("progressCard");
 const progressTitleText = document.getElementById("progressTitleText");
 const progressTimer = document.getElementById("progressTimer");
+const timerText = document.getElementById("timerText");
+const btnCancelSearch = document.getElementById("btnCancelSearch");
 const progressBar = document.getElementById("progressBar");
+const progressDetail = document.getElementById("progressDetail");
+const progressSlowNotice = document.getElementById("progressSlowNotice");
 const pStep1 = document.getElementById("pStep1");
 const pStep2 = document.getElementById("pStep2");
 const pStep3 = document.getElementById("pStep3");
@@ -66,6 +71,17 @@ function init() {
     if (state.currentQuery) executeSearch(state.currentQuery);
   });
   btnResetRefine.addEventListener("click", resetToOriginalResults);
+
+  // Cancel search button
+  if (btnCancelSearch) {
+    btnCancelSearch.addEventListener("click", () => {
+      if (state.searchAbortController) {
+        state.searchAbortController.abort();
+      }
+      setSearchingState(false);
+      showError("Search Cancelled", "The search was cancelled. You can submit another query whenever you're ready.");
+    });
+  }
 
   // Search input clear button
   searchInput.addEventListener("input", () => {
@@ -114,6 +130,7 @@ function handleSearchSubmit(e) {
 
 async function executeSearch(query) {
   state.currentQuery = query;
+  state.searchAbortController = new AbortController();
   setSearchingState(true);
   hideAllAlerts();
 
@@ -123,7 +140,8 @@ async function executeSearch(query) {
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ query })
+      body: JSON.stringify({ query }),
+      signal: state.searchAbortController.signal
     });
 
     const data = await res.json().catch(() => ({ error: "invalid_json" }));
@@ -136,6 +154,10 @@ async function executeSearch(query) {
     // Success response
     handleSearchSuccess(data);
   } catch (err) {
+    if (err.name === "AbortError") {
+      console.log("Search request was cancelled by user.");
+      return;
+    }
     console.error("Search network error:", err);
     showError(
       "Connection Failed",
@@ -143,6 +165,7 @@ async function executeSearch(query) {
     );
   } finally {
     setSearchingState(false);
+    state.searchAbortController = null;
   }
 }
 
@@ -524,6 +547,142 @@ function renderTableBody(rows, columns) {
   });
 }
 
+function parseSymbolTier(val) {
+  if (typeof val !== "string") return null;
+  const s = val.trim();
+  const m = s.match(/^([\$€£₹])\1{0,4}$/);
+  if (m) {
+    return {
+      symbol: m[1],
+      count: s.length
+    };
+  }
+  return null;
+}
+
+function parseRange(val) {
+  if (typeof val !== "string") return null;
+  const s = val.trim();
+  // Match range with dash (hyphen, en-dash \u2013, em-dash \u2014) or "to"
+  const rangeRegex = /^[₹$€£\s]*(?:rs\.?|inr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*(?:[–—\-]|to)\s*[₹$€£\s]*(?:rs\.?|inr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*([a-zA-Z%]+)?$/i;
+  const m = s.match(rangeRegex);
+  if (m) {
+    const low = parseFloat(m[1].replace(/,/g, ""));
+    const high = parseFloat(m[2].replace(/,/g, ""));
+    const midpoint = (low + high) / 2;
+    const unit = m[3] ? m[3].trim().toLowerCase() : "";
+    return { low, high, midpoint, unit };
+  }
+  return null;
+}
+
+function parseSingleNumber(val) {
+  if (typeof val === "number" && !isNaN(val)) {
+    return { value: val, unit: "" };
+  }
+  if (typeof val === "string") {
+    const s = val.trim();
+    if (/^[\$€£₹]+$/.test(s)) return null;
+
+    const currMatch = s.match(/^[₹$€£\s]*(?:rs\.?|inr)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)$/i);
+    if (currMatch) {
+      return { value: parseFloat(currMatch[1].replace(/,/g, "")), unit: "" };
+    }
+
+    const unitMatch = s.match(/^([+-]?(?:\d+(?:,\d+)*(?:\.\d+)?|\.\d+))\s*([a-zA-Z%]+)?$/);
+    if (unitMatch) {
+      return {
+        value: parseFloat(unitMatch[1].replace(/,/g, "")),
+        unit: unitMatch[2] ? unitMatch[2].trim().toLowerCase() : ""
+      };
+    }
+  }
+  return null;
+}
+
+function detectSortKey(val) {
+  if (val === null || val === undefined || val === "") {
+    return { type: "empty", value: null };
+  }
+
+  // 1. Symbol tier (e.g. "$", "$$", "$$$", "$$$$")
+  const tier = parseSymbolTier(val);
+  if (tier) {
+    return { type: "tier", value: tier.count, raw: val };
+  }
+
+  // 2. Number / Currency Range (e.g. "₹200–400", "₹90–150")
+  const range = parseRange(val);
+  if (range) {
+    // Sort primarily by lower bound, secondary by upper bound / midpoint
+    return {
+      type: "numeric",
+      value: range.low,
+      secondary: range.high,
+      midpoint: range.midpoint,
+      raw: val
+    };
+  }
+
+  // 3. Plain Number or Single Quantity with Unit/Currency (e.g. 54990, "₹54,990", "16GB", "18 hrs")
+  const single = parseSingleNumber(val);
+  if (single) {
+    return {
+      type: "numeric",
+      value: single.value,
+      secondary: single.value,
+      midpoint: single.value,
+      raw: val
+    };
+  }
+
+  // 4. Plain text fallback (e.g. "Italian", "Casual", "Beginner")
+  return {
+    type: "text",
+    value: String(val).trim(),
+    raw: val
+  };
+}
+
+function compareSortKeys(keyA, keyB, direction) {
+  // Empty values always sink to the bottom in both directions
+  if (keyA.type === "empty" && keyB.type === "empty") return 0;
+  if (keyA.type === "empty") return 1;
+  if (keyB.type === "empty") return -1;
+
+  // 1. Both are numeric (including ranges, plain numbers, currency amounts)
+  if (keyA.type === "numeric" && keyB.type === "numeric") {
+    let diff = keyA.value - keyB.value;
+    if (diff === 0 && keyA.secondary !== undefined && keyB.secondary !== undefined) {
+      diff = keyA.secondary - keyB.secondary;
+    }
+    return direction === "asc" ? diff : -diff;
+  }
+
+  // 2. Both are symbol tiers (e.g. "$$" vs "$$$$")
+  if (keyA.type === "tier" && keyB.type === "tier") {
+    const diff = keyA.value - keyB.value;
+    return direction === "asc" ? diff : -diff;
+  }
+
+  // 3. Both are plain text (e.g. "Italian" vs "Chinese")
+  if (keyA.type === "text" && keyB.type === "text") {
+    return direction === "asc"
+      ? keyA.value.localeCompare(keyB.value, undefined, { numeric: true, sensitivity: "base" })
+      : keyB.value.localeCompare(keyA.value, undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  // 4. Mixed types within same column: numeric ranks before tiers, then text
+  const typeRank = { numeric: 1, tier: 2, text: 3 };
+  const rankA = typeRank[keyA.type] || 99;
+  const rankB = typeRank[keyB.type] || 99;
+  if (rankA !== rankB) {
+    return direction === "asc" ? rankA - rankB : rankB - rankA;
+  }
+
+  return 0;
+}
+
 function handleColumnSort(col) {
   if (!state.currentData || !state.currentData.rows) return;
 
@@ -532,79 +691,21 @@ function handleColumnSort(col) {
   if (state.currentSort.column === col) {
     newDir = state.currentSort.direction === "asc" ? "desc" : "asc";
   } else {
-    // For price or rating, natural default may be desc for rating or asc for price
-    newDir = (col === "rating" || col === "battery") ? "desc" : "asc";
+    // For rating, natural default is desc; for others asc
+    newDir = (col === "rating" || col === "score") ? "desc" : "asc";
   }
 
   state.currentSort = { column: col, direction: newDir };
 
-  // Sort rows client-side in memory without any new network request
+  // Sort rows client-side in memory with type-aware comparator
   state.currentData.rows.sort((a, b) => {
-    const valA = a[col];
-    const valB = b[col];
-
-    // Nulls / empty always sink to the bottom
-    const isNullA = valA === null || valA === undefined || valA === "";
-    const isNullB = valB === null || valB === undefined || valB === "";
-    if (isNullA && isNullB) return 0;
-    if (isNullA) return 1;
-    if (isNullB) return -1;
-
-    // 1. Symbol tier scale (e.g. $, $$, $$$, $$$$)
-    if (isSymbolTier(valA) && isSymbolTier(valB)) {
-      const lenA = String(valA).trim().length;
-      const lenB = String(valB).trim().length;
-      return newDir === "asc" ? lenA - lenB : lenB - lenA;
-    }
-
-    // 2. Both values are numbers
-    if (typeof valA === "number" && typeof valB === "number") {
-      return newDir === "asc" ? valA - valB : valB - valA;
-    }
-
-    // 3. Formatted quantities with identical units (e.g. 16GB vs 8GB, 18 hrs vs 14 hrs)
-    const numA = parseSortableNumber(valA);
-    const numB = parseSortableNumber(valB);
-    if (numA !== null && numB !== null) {
-      return newDir === "asc" ? numA - numB : numB - numA;
-    }
-
-    // 4. Generic string natural sort (handles non-numeric like "Moderate", "Italian", "30-45 mins")
-    const strA = String(valA);
-    const strB = String(valB);
-    return newDir === "asc"
-      ? strA.localeCompare(strB, undefined, { numeric: true, sensitivity: "base" })
-      : strB.localeCompare(strA, undefined, { numeric: true, sensitivity: "base" });
+    const keyA = detectSortKey(a[col]);
+    const keyB = detectSortKey(b[col]);
+    return compareSortKeys(keyA, keyB, newDir);
   });
 
   updateSortHeaderIndicators();
   renderTableBody(state.currentData.rows, state.currentData.columns);
-}
-
-function isSymbolTier(val) {
-  return typeof val === "string" && /^[\$€£₹]{1,5}$/.test(val.trim());
-}
-
-function parseSortableNumber(val) {
-  if (typeof val === "number") return val;
-  if (typeof val === "string") {
-    const s = val.trim();
-    // Do not parse repeated currency symbols ($$, $$$) as numbers!
-    if (/^[\$€£₹]+$/.test(s)) return null;
-
-    // Check for clean currency strings like "₹54,990" or "$50"
-    const currMatch = s.match(/^[₹$€£]\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)$/);
-    if (currMatch) {
-      return parseFloat(currMatch[1].replace(/,/g, ""));
-    }
-
-    // Check for number with optional units (e.g. "16GB", "18 hrs", "4.5 stars", "50000")
-    const match = s.match(/^([+-]?(?:\d+(?:,\d+)*(?:\.\d+)?|\.\d+))\s*([a-zA-Z%]+)?$/);
-    if (match) {
-      return parseFloat(match[1].replace(/,/g, ""));
-    }
-  }
-  return null;
 }
 
 function updateSortHeaderIndicators() {
@@ -656,24 +757,49 @@ function setRefiningState(isRefining) {
 
 function startProgressTimer() {
   state.progressStartTime = Date.now();
-  progressTimer.textContent = "00:00s elapsed";
+  if (timerText) timerText.textContent = "00:00 elapsed";
   progressBar.style.width = "10%";
+  if (progressSlowNotice) progressSlowNotice.style.display = "none";
   resetProgressSteps();
 
   state.progressInterval = setInterval(() => {
     const elapsedSec = Math.floor((Date.now() - state.progressStartTime) / 1000);
-    const formatted = `00:${String(elapsedSec).padStart(2, "0")}s elapsed`;
-    progressTimer.textContent = formatted;
+    const mins = Math.floor(elapsedSec / 60);
+    const secs = elapsedSec % 60;
+    const formatted = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")} elapsed`;
+    if (timerText) timerText.textContent = formatted;
 
-    // Dynamic phase transitions over typical 11-15s latency
-    if (elapsedSec < 3) {
-      setProgressStep(1, 25, "1. Classifying intent & selecting search engine...");
-    } else if (elapsedSec < 7) {
-      setProgressStep(2, 50, "2. Fetching live search data via SerpApi...");
-    } else if (elapsedSec < 12) {
-      setProgressStep(3, 75, "3. AI inferring comparison attributes...");
+    // Smooth asymptotic progress calculation (approaches 97% over 180s without freezing)
+    const asymptoticPercent = Math.min(97, 10 + Math.floor(87 * (1 - Math.exp(-elapsedSec / 45))));
+    progressBar.style.width = `${asymptoticPercent}%`;
+
+    // Show contextual notice for queries taking longer than 30s
+    if (elapsedSec >= 30 && progressSlowNotice) {
+      progressSlowNotice.style.display = "flex";
+    }
+
+    // Dynamic progressive timeline reflecting backend retries & fallbacks (up to 3 min)
+    if (elapsedSec < 6) {
+      setProgressStep(1, "1. Classifying intent & selecting search engine...");
+      if (progressDetail) progressDetail.textContent = "Analyzing query intent to select Google Shopping or general web search...";
+    } else if (elapsedSec < 18) {
+      setProgressStep(2, "2. Querying live results via SerpApi...");
+      if (progressDetail) progressDetail.textContent = "Connecting to search engines and retrieving fresh product specs & web results...";
+    } else if (elapsedSec < 35) {
+      setProgressStep(3, "3. AI reasoning: inferring comparison facets...");
+      if (progressDetail) progressDetail.textContent = "AI model evaluating results to infer the 3–5 most critical comparison dimensions...";
+    } else if (elapsedSec < 60) {
+      setProgressStep(4, "4. Extracting grounded values per item...");
+      if (progressDetail) progressDetail.textContent = "Extracting verified attributes from raw search snippets and formatting rows...";
+    } else if (elapsedSec < 100) {
+      setProgressStep(4, "Search Fallback Active: General Engine Engaged...");
+      if (progressDetail) progressDetail.textContent = "Initial engine results sparse. Activated general Google search fallback with backoff retry...";
+    } else if (elapsedSec < 140) {
+      setProgressStep(4, "AI Re-Extracting with Broadened Results...");
+      if (progressDetail) progressDetail.textContent = "Processing enriched fallback data with model retry. Ensuring grounded values...";
     } else {
-      setProgressStep(4, 90, "4. Structuring comparison table...");
+      setProgressStep(4, "Finalizing Comparison Table...");
+      if (progressDetail) progressDetail.textContent = "Polishing table facets, ordering rows, and compiling reviewer synthesis. Almost ready!";
     }
   }, 500);
 }
@@ -692,8 +818,7 @@ function resetProgressSteps() {
   pStep1.classList.add("active");
 }
 
-function setProgressStep(stepNum, percent, label) {
-  progressBar.style.width = `${percent}%`;
+function setProgressStep(stepNum, label) {
   progressTitleText.textContent = label;
 
   const steps = [pStep1, pStep2, pStep3, pStep4];
@@ -727,10 +852,18 @@ function handleApiError(status, data, defaultTitle = "Search Failed") {
 
   if (status === 422) {
     showError("Invalid Input", "Please enter a valid search query.");
+  } else if (status === 504 || errCode === "timeout") {
+    showError(
+      "Search Request Timed Out",
+      "The query took over 3 minutes due to upstream search provider or AI rate limits. Please click 'Try Again' — retrying usually connects immediately."
+    );
   } else if (errCode === "search_unavailable") {
     showError("Search Provider Unavailable", msg || "The live search provider timed out or didn't respond. Please try again.");
   } else if (errCode === "ai_busy") {
-    showError("AI Service Busy", msg || "The AI model is temporarily rate-limited or busy. Please retry shortly.");
+    showError(
+      "AI Service Rate-Limited or Busy",
+      msg || "The AI reasoning service timed out during fallback attempts or is temporarily rate-limited. Retrying usually succeeds on the next attempt."
+    );
   } else if (errCode === "ai_bad_output") {
     showError("AI Output Unreadable", msg || "The AI generated an invalid JSON format. Retrying typically solves this.");
   } else if (errCode === "ai_unavailable") {
@@ -788,12 +921,17 @@ function formatCellValue(col, val) {
     return val.toLocaleString();
   }
 
-  // 3. String values (e.g. price_level as "$$", cuisine, duration, etc.)
+  // 3. String values (e.g. price_range as "₹200–400", price_level as "$$", cuisine, duration, etc.)
   const strVal = String(val).trim();
 
   // Repeated symbol scale (like "$", "$$", "$$$", "€€")
-  if (isSymbolTier(strVal)) {
+  if (parseSymbolTier(strVal)) {
     return `<span class="cell-tier" title="Price tier: ${escapeHtml(strVal)}">${escapeHtml(strVal)}</span>`;
+  }
+
+  // Number / Currency range (e.g. "₹200–400", "₹90–150")
+  if (parseRange(strVal)) {
+    return `<span class="cell-range">${escapeHtml(strVal)}</span>`;
   }
 
   // Rating string (e.g. "4.5" or "4.8")
